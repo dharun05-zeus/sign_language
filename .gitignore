@@ -1,0 +1,35 @@
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Large datasets and media files
+data/landmarks/
+data/wlasl/videos/
+data/wlasl/*.csv
+data/wlasl/*.npy
+data/how2sign/
+data/msasl/
+*.npy
+*.mp4
+*.zip
+*.tar
+*.gz
+
+# Checkpoints
+checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo

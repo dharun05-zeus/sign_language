@@ -1,0 +1,25 @@
+# Install PyTorch FIRST, separately, with the correct CUDA index URL:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Do NOT just `pip install torch` from this file on Windows - it will grab a
+# CPU-only build unless you use the index-url above. See README.md Step 1.
+
+transformers>=4.40.0
+accelerate>=0.30.0
+bitsandbytes>=0.43.0       # 4-bit NF4 quantization (Windows: needs >=0.43.0 for native win support)
+peft>=0.10.0                # LoRA
+sentencepiece>=0.2.0        # T5 tokenizer dependency
+mediapipe>=0.10.9
+opencv-python>=4.9.0
+numpy>=1.26.0,<2.0.0        # mediapipe is not yet numpy 2.x compatible as of this writing
+pandas>=2.2.0
+pyyaml>=6.0
+tqdm>=4.66.0
+sacrebleu>=2.4.0
+evaluate>=0.4.0
+rouge-score>=0.1.2
+jiwer>=3.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+requests>=2.31.0
+python-multipart>=0.0.9

@@ -1,0 +1,43 @@
+landmark_dim: 345
+max_frames: 150
+t5_model: t5-large
+t5_hidden_size: 1024
+projector_hidden: 512
+lora_r: 16
+lora_alpha: 32
+batch_size: 4
+gradient_accumulation_steps: 4
+fp16: true
+gradient_checkpointing: true
+
+paths:
+  wlasl_root: data/wlasl
+  how2sign_root: data/how2sign
+  msasl_root: data/msasl
+  landmarks_root: data/landmarks
+  checkpoints_root: checkpoints
+
+phase1:
+  dataset: WLASL100
+  index_csv: data/wlasl/index_wlasl100.csv
+  landmarks_dir: data/landmarks/wlasl100
+  epochs: 20
+  lr_projector: 1.0e-4
+  lr_lora: 3.0e-4
+  out_dir: checkpoints/phase1
+
+phase2:
+  dataset: How2Sign
+  epochs: 20
+  lr_projector: 5.0e-5
+  lr_lora: 1.0e-4
+  out_dir: checkpoints/phase2
+
+phase3:
+  dataset: MSASL100
+  epochs: 10
+  lr_projector: 1.0e-5
+  lr_lora: 1.0e-5
+  out_dir: checkpoints/phase3
+
+grammar_confidence_threshold: 0.75
