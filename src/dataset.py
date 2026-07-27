@@ -25,7 +25,7 @@ from torch.utils.data import Dataset
 
 
 class LandmarkTextDataset(Dataset):
-    def __init__(self, manifest_csv, text_col="gloss", split=None, max_frames=150):
+    def __init__(self, manifest_csv, text_col="gloss", split=None, max_frames=150, in_memory=True):
         self.df = pd.read_csv(manifest_csv)
         if split is not None and "split" in self.df.columns:
             self.df = self.df[self.df["split"] == split].reset_index(drop=True)
@@ -36,11 +36,23 @@ class LandmarkTextDataset(Dataset):
             )
         self.text_col = text_col
         self.max_frames = max_frames
+        self.in_memory = in_memory
+        
+        self.cached_landmarks = []
+        self.cached_attention_masks = []
+        
+        if self.in_memory:
+            print(f"Preloading dataset into memory (split={split})...")
+            from tqdm import tqdm
+            for idx in tqdm(range(len(self.df)), desc="Preloading landmarks"):
+                landmarks, attention_mask = self._load_and_process(idx)
+                self.cached_landmarks.append(landmarks)
+                self.cached_attention_masks.append(attention_mask)
 
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def _load_and_process(self, idx):
         row = self.df.iloc[idx]
         landmarks = np.load(row["landmark_path"]).astype(np.float32)  # (T, 345)
 
@@ -54,7 +66,17 @@ class LandmarkTextDataset(Dataset):
         else:
             landmarks = landmarks[: self.max_frames]
             attention_mask = np.ones(self.max_frames, dtype=np.float32)
+            
+        return landmarks, attention_mask
 
+    def __getitem__(self, idx):
+        if self.in_memory:
+            landmarks = self.cached_landmarks[idx]
+            attention_mask = self.cached_attention_masks[idx]
+        else:
+            landmarks, attention_mask = self._load_and_process(idx)
+
+        row = self.df.iloc[idx]
         text = str(row[self.text_col])
 
         return {

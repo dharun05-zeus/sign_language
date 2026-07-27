@@ -89,6 +89,7 @@ def build_t5_4bit_lora(model_name="t5-large", lora_r=16, lora_alpha=32, lora_dro
     )
 
     model = get_peft_model(model, lora_config)
+    model.enable_input_require_grads()
     return model
 
 

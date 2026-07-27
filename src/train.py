@@ -69,38 +69,83 @@ def save_checkpoint(model, out_dir):
     print(f"Saved checkpoint to {out_dir}")
 
 
-def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=True, log_prefix=""):
+def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=True, log_prefix="", grad_accum=1, limit_batches=None):
     model.train(train)
     total_loss = 0.0
     n_batches = 0
 
+    import time
+    t_data_total = 0.0
+    t_forward_total = 0.0
+    t_backward_total = 0.0
+    t_opt_total = 0.0
+
+    t_start_data = time.perf_counter()
+
+    if train:
+        optimizer.zero_grad()
+
     progress = tqdm(dataloader, desc=log_prefix)
-    for batch in progress:
-        landmarks = batch["landmarks"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
+    for i, batch in enumerate(progress):
+        t_data = time.perf_counter() - t_start_data
+        t_data_total += t_data
+
+        t_start_fwd = time.perf_counter()
+        landmarks = batch["landmarks"].to(device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         texts = batch["texts"]
 
         target_enc = tokenizer(
             texts, padding=True, truncation=True, max_length=64, return_tensors="pt"
         )
-        labels = target_enc["input_ids"].to(device)
+        labels = target_enc["input_ids"].to(device, non_blocking=True)
         labels[labels == tokenizer.pad_token_id] = -100  # ignore pad in loss
 
-        if train:
-            optimizer.zero_grad()
-
-        with autocast(device_type="cuda", dtype=torch.float16):
+        device_type = "cuda" if "cuda" in device else "cpu"
+        with autocast(device_type=device_type, dtype=torch.float16, enabled=("cuda" in device)):
             outputs = model(landmarks=landmarks, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
+            loss = outputs.loss / grad_accum
 
+        t_fwd = time.perf_counter() - t_start_fwd
+        t_forward_total += t_fwd
+
+        t_start_bwd = time.perf_counter()
         if train:
             scaler.scale(loss).backward()
+        t_bwd = time.perf_counter() - t_start_bwd
+        t_backward_total += t_bwd
+
+        t_start_opt = time.perf_counter()
+        if train and (i + 1) % grad_accum == 0:
             scaler.step(optimizer)
             scaler.update()
+            optimizer.zero_grad()
+        t_opt = time.perf_counter() - t_start_opt
+        t_opt_total += t_opt
 
-        total_loss += loss.item()
+        total_loss += loss.item() * grad_accum
         n_batches += 1
-        progress.set_postfix(loss=f"{loss.item():.4f}")
+        progress.set_postfix(loss=f"{(loss.item() * grad_accum):.4f}")
+
+        if limit_batches is not None and n_batches >= limit_batches:
+            break
+
+        t_start_data = time.perf_counter()
+
+    if train and n_batches % grad_accum != 0:
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+
+    if n_batches > 0:
+        print(f"\n[{log_prefix} Timing Summary]")
+        print(f"  Total Batches Profiling: {n_batches}")
+        print(f"  Avg Data Loading: {t_data_total / n_batches:.4f}s / batch")
+        print(f"  Avg Forward Pass: {t_forward_total / n_batches:.4f}s / batch")
+        print(f"  Avg Backward Pass: {t_backward_total / n_batches:.4f}s / batch")
+        print(f"  Avg Optimizer Step: {t_opt_total / n_batches:.4f}s / batch")
+        total_time = (t_data_total + t_forward_total + t_backward_total + t_opt_total)
+        print(f"  Total Batch Time (excl. stdout): {total_time / n_batches:.4f}s / batch")
 
     return total_loss / max(n_batches, 1)
 
@@ -114,15 +159,38 @@ def main():
     parser.add_argument("--text_col", default=None,
                          help="Override text column (gloss for phase 1/3, sentence for phase 2)")
     parser.add_argument("--val_every", type=int, default=1, help="Run validation every N epochs")
+    parser.add_argument("--allow_cpu", action="store_true", help="Bypass fast-fail CUDA check (for debugging only)")
+    parser.add_argument("--limit_batches", type=int, default=None, help="Limit number of batches per epoch (for profiling)")
+    parser.add_argument("--no_preload", action="store_true", help="Disable in-memory landmark dataset preloading")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     phase_key = f"phase{args.phase}"
     phase_cfg = cfg[phase_key]
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
-        print("WARNING: CUDA not available - training will be extremely slow / may OOM on CPU.")
+    print("=== STARTUP CUDA & BITSANDBYTES DIAGNOSTICS ===")
+    cuda_avail = torch.cuda.is_available()
+    print(f"PyTorch CUDA available: {cuda_avail}")
+    if cuda_avail:
+        print(f"PyTorch CUDA device count: {torch.cuda.device_count()}")
+        print(f"PyTorch CUDA active device name: {torch.cuda.get_device_name(0)}")
+    
+    try:
+        import bitsandbytes as bnb
+        print(f"bitsandbytes version: {bnb.__version__}")
+    except ImportError:
+        print("WARNING: bitsandbytes is not installed.")
+
+    print("===============================================")
+
+    if not args.allow_cpu and not cuda_avail:
+        raise RuntimeError(
+            "CUDA is not available. Training on CPU will silently take "
+            "hours per epoch on this hardware. Fix GPU/driver/CUDA setup "
+            "before proceeding."
+        )
+
+    device = "cuda" if cuda_avail else "cpu"
 
     manifest_csv = args.manifest or phase_cfg.get("manifest_csv") or os.path.join(
         cfg["paths"]["landmarks_root"], phase_cfg["dataset"].lower(), "manifest.csv"
@@ -137,10 +205,11 @@ def main():
 
     print(f"Phase {args.phase} | dataset={phase_cfg['dataset']} | manifest={manifest_csv} | text_col={text_col}")
 
+    in_memory = not args.no_preload
     train_ds = LandmarkTextDataset(manifest_csv, text_col=text_col, split="train",
-                                    max_frames=cfg["max_frames"])
+                                    max_frames=cfg["max_frames"], in_memory=in_memory)
     val_ds = LandmarkTextDataset(manifest_csv, text_col=text_col, split="val",
-                                  max_frames=cfg["max_frames"])
+                                  max_frames=cfg["max_frames"], in_memory=in_memory)
 
     print(f"Train examples: {len(train_ds)} | Val examples: {len(val_ds)}")
     if len(train_ds) == 0:
@@ -148,13 +217,15 @@ def main():
               "contains 'train' rows.")
         sys.exit(1)
 
+    # Use pin_memory=True for fast transfers to GPU
+    use_pin = "cuda" in device
     train_loader = DataLoader(
         train_ds, batch_size=cfg["batch_size"], shuffle=True,
-        collate_fn=collate_fn, num_workers=0,
+        collate_fn=collate_fn, num_workers=0, pin_memory=use_pin,
     )
     val_loader = DataLoader(
         val_ds, batch_size=cfg["batch_size"], shuffle=False,
-        collate_fn=collate_fn, num_workers=0,
+        collate_fn=collate_fn, num_workers=0, pin_memory=use_pin,
     )
 
     model = ASLTranslationModel(
@@ -200,6 +271,7 @@ def main():
         train_loss = run_epoch(
             model, train_loader, optimizer, scaler, device, model.tokenizer,
             train=True, log_prefix=f"Phase{args.phase} Epoch{epoch}/[train]",
+            grad_accum=grad_accum, limit_batches=args.limit_batches
         )
 
         val_loss = None
@@ -208,6 +280,7 @@ def main():
                 val_loss = run_epoch(
                     model, val_loader, optimizer, scaler, device, model.tokenizer,
                     train=False, log_prefix=f"Phase{args.phase} Epoch{epoch}/[val]",
+                    grad_accum=grad_accum, limit_batches=args.limit_batches
                 )
 
         print(f"Epoch {epoch}: train_loss={train_loss:.4f}"
