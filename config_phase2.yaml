@@ -1,0 +1,31 @@
+# ASL-to-English Sentence Translation Hyperparameters (Phase 2 - How2Sign)
+
+landmark_dim: 345          # Includes eyebrows + mouth region facial landmarks
+max_frames: 150
+t5_model: t5-large
+t5_hidden_size: 1024
+projector_hidden: 512
+lora_r: 16
+lora_alpha: 32
+batch_size: 4
+gradient_accumulation_steps: 4  # Effective batch size = 16
+fp16: true
+gradient_checkpointing: true
+
+# Checkpoints Configuration
+phase1_checkpoint_dir: checkpoints/phase1
+phase2_out_dir: checkpoints/phase2
+
+# How2Sign Dataset Paths
+how2sign:
+  train_manifest: data/how2sign/train_manifest.csv
+  train_transcripts: data/how2sign/train_transcripts.tsv
+  val_manifest: data/how2sign/val_manifest.csv
+  val_transcripts: data/how2sign/val_transcripts.tsv
+  epochs: 20
+  lr_projector: 5.0e-5      # Lower LR than Phase 1 for fine-tuning stability
+  lr_lora: 1.0e-4           # Lower LR than Phase 1
+  val_every: 1
+
+# Spot-check validation path to verify Phase 1 model integrity
+wlasl_val_manifest: data/landmarks/wlasl100/manifest.csv
