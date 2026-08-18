@@ -65,12 +65,22 @@ class LandmarkProjector(nn.Module):
 
 
 def build_t5_4bit_lora(model_name="t5-large", lora_r=16, lora_alpha=32, lora_dropout=0.05):
-    """Loads T5-Large in 4-bit NF4 and wraps Q/V attention projections with LoRA."""
+    """Loads T5-Large in 4-bit NF4 and wraps Q/V attention projections with LoRA.
+
+    IMPORTANT — enable_input_require_grads() ordering:
+    With 4-bit NF4 quantization (bitsandbytes), the base model's weights are
+    frozen/quantized and won't naturally propagate gradients back through
+    inputs_embeds. We must call enable_input_require_grads() on the RAW base
+    model BEFORE get_peft_model() wraps it. Calling it after (on the PeftModel)
+    skips the hook registration on the inner base model, causing the projector's
+    output tensor to lose its grad_fn at the T5 encoder boundary — silently
+    zeroing projector gradients under gradient checkpointing.
+    """
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.bfloat16,  # bfloat16 prevents float16 overflow
     )
 
     model = T5ForConditionalGeneration.from_pretrained(
@@ -78,6 +88,12 @@ def build_t5_4bit_lora(model_name="t5-large", lora_r=16, lora_alpha=32, lora_dro
         quantization_config=bnb_config,
         device_map="auto",
     )
+
+    # ← Must come BEFORE get_peft_model() so the hook is on the base model.
+    # This registers a forward hook that forces input tensors to require grad,
+    # which is necessary for inputs_embeds (our projector output) to carry
+    # gradients through the quantized T5 encoder layers.
+    model.enable_input_require_grads()
 
     lora_config = LoraConfig(
         r=lora_r,
@@ -89,7 +105,6 @@ def build_t5_4bit_lora(model_name="t5-large", lora_r=16, lora_alpha=32, lora_dro
     )
 
     model = get_peft_model(model, lora_config)
-    model.enable_input_require_grads()
     return model
 
 
@@ -110,22 +125,35 @@ class ASLTranslationModel(nn.Module):
 
     def forward(self, landmarks, attention_mask, labels=None):
         inputs_embeds = self.projector(landmarks)  # (B, T, 1024)
-        # Cast to match T5's compute dtype under 4-bit (fp16 activations)
-        inputs_embeds = inputs_embeds.to(dtype=next(self.t5.parameters()).dtype)
+
+        # Explicitly cast to bfloat16 (our configured bnb_4bit_compute_dtype).
+        inputs_embeds = inputs_embeds.to(dtype=torch.bfloat16)
+
+        # Sanity guard — catch NaN/inf before they enter T5 so the error is
+        # actionable rather than a silent NaN loss.
+        if torch.isnan(inputs_embeds).any() or torch.isinf(inputs_embeds).any():
+            raise RuntimeError(
+                "inputs_embeds contains NaN or Inf after projector. "
+                "Check landmark data for corrupted .npy files or extreme values."
+            )
+
+        # T5 expects attention_mask as a LongTensor (0/1) for its
+        # get_extended_attention_mask() to compute the additive mask correctly.
+        attention_mask_long = attention_mask.long()
 
         outputs = self.t5(
             inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask_long,
             labels=labels,
         )
         return outputs
 
     def generate(self, landmarks, attention_mask, max_new_tokens=32, num_beams=4):
         inputs_embeds = self.projector(landmarks)
-        inputs_embeds = inputs_embeds.to(dtype=next(self.t5.parameters()).dtype)
+        inputs_embeds = inputs_embeds.to(dtype=torch.bfloat16)
         generated_ids = self.t5.generate(
             inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask.long(),
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
         )

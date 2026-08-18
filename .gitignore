@@ -5,29 +5,51 @@ __pycache__/
 *.pyd
 .Python
 
-# Virtual environments
+# Virtual environments — project-local venv
+asl-env/
 venv/
 .venv/
 env/
 ENV/
 
-# Large datasets and media files
-data/landmarks/
+# Raw source videos (deleted after landmark extraction)
+data/raw_videos/*
+!data/raw_videos/.gitkeep
+
+# Extracted landmarks (large .npy files)
+data/landmarks/*
+!data/landmarks/.gitkeep
+!data/landmarks/wlasl100/.gitkeep
+
+# WLASL dataset files
 data/wlasl/videos/
 data/wlasl/*.csv
 data/wlasl/*.npy
-data/how2sign/
-data/msasl/
+
+# How2Sign dataset
+data/how2sign/*
+!data/how2sign/.gitkeep
+
+# MS-ASL dataset
+data/msasl/*
+!data/msasl/.gitkeep
+
+# Generic large file types
 *.npy
 *.mp4
 *.zip
 *.tar
 *.gz
 
-# Checkpoints
-checkpoints/
+# Model checkpoints
+checkpoints/phase1/*
+checkpoints/phase2/*
+checkpoints/phase3/*
+!checkpoints/phase1/.gitkeep
+!checkpoints/phase2/.gitkeep
+!checkpoints/phase3/.gitkeep
 
-# IDE files
+# IDE / OS files
 .vscode/
 .idea/
 .DS_Store
