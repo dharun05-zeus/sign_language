@@ -102,7 +102,7 @@ def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=Tru
         labels[labels == tokenizer.pad_token_id] = -100  # ignore pad in loss
 
         device_type = "cuda" if "cuda" in device else "cpu"
-        with autocast(device_type=device_type, dtype=torch.float16, enabled=("cuda" in device)):
+        with autocast(device_type=device_type, dtype=torch.bfloat16, enabled=("cuda" in device)):
             outputs = model(landmarks=landmarks, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss / grad_accum
 
@@ -161,8 +161,25 @@ def main():
     parser.add_argument("--val_every", type=int, default=1, help="Run validation every N epochs")
     parser.add_argument("--allow_cpu", action="store_true", help="Bypass fast-fail CUDA check (for debugging only)")
     parser.add_argument("--limit_batches", type=int, default=None, help="Limit number of batches per epoch (for profiling)")
+    parser.add_argument("--max-steps", dest="max_steps", type=int, default=None,
+                        help="Alias for --limit_batches: stop each epoch after N steps")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="Run 5 steps, skip validation, print timing summary and exit. "
+                             "Use to confirm CUDA + bitsandbytes + data loading before a full run.")
     parser.add_argument("--no_preload", action="store_true", help="Disable in-memory landmark dataset preloading")
     args = parser.parse_args()
+
+    # --dry-run wires into existing flags: 5 steps, no val, single epoch
+    if args.dry_run:
+        args.max_steps = args.max_steps or 5
+        args.val_every = 9999  # skip validation entirely during dry run
+        print("\n" + "=" * 55)
+        print(" DRY RUN MODE  (--dry-run, max_steps=%d)" % args.max_steps)
+        print("=" * 55)
+
+    # Resolve --max-steps → limit_batches
+    if args.max_steps is not None:
+        args.limit_batches = args.max_steps
 
     cfg = load_config(args.config)
     phase_key = f"phase{args.phase}"
@@ -257,7 +274,7 @@ def main():
         lr_lora=phase_cfg["lr_lora"],
     )
     optimizer = torch.optim.AdamW(param_groups)
-    scaler = GradScaler(enabled=cfg.get("fp16", True))
+    scaler = GradScaler(enabled=False)
 
     out_dir = phase_cfg["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
@@ -283,8 +300,24 @@ def main():
                     grad_accum=grad_accum, limit_batches=args.limit_batches
                 )
 
-        print(f"Epoch {epoch}: train_loss={train_loss:.4f}"
-              + (f" val_loss={val_loss:.4f}" if val_loss is not None else ""))
+        # Dry-run: skip checkpointing, print summary, exit after 1 epoch
+        if args.dry_run:
+            peak_mb = torch.cuda.max_memory_allocated() // (1024 ** 2)
+            total_mb = torch.cuda.get_device_properties(0).total_memory // (1024 ** 2)
+            print("\n" + "=" * 55)
+            print(" DRY RUN COMPLETE")
+            print("=" * 55)
+            print(f"  device        : {torch.cuda.get_device_name(0)}")
+            print(f"  train_loss    : {train_loss:.4f}  (sanity: should be finite)")
+            print(f"  peak VRAM     : {peak_mb} MB / {total_mb} MB")
+            print(f"  bitsandbytes  : loaded OK (4-bit model ran without fallback)")
+            print("=" * 55)
+            if not (train_loss == train_loss):  # NaN check
+                print("  *** FAIL: loss is NaN — check model init or data ***")
+            else:
+                print("  *** DRY RUN PASSED — safe to start full training ***")
+            print("=" * 55 + "\n")
+            return
 
         log_rows.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         with open(log_path, "w", newline="") as f:

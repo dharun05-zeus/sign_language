@@ -38,16 +38,23 @@ class LandmarkTextDataset(Dataset):
         self.max_frames = max_frames
         self.in_memory = in_memory
         
-        self.cached_landmarks = []
-        self.cached_attention_masks = []
-        
+        self.cached_landmarks: list[torch.Tensor] = []
+        self.cached_attention_masks: list[torch.Tensor] = []
+
         if self.in_memory:
-            print(f"Preloading dataset into memory (split={split})...")
+            print(f"Preloading dataset into RAM as float32 tensors (split={split}, n={len(self.df)})...")
             from tqdm import tqdm
             for idx in tqdm(range(len(self.df)), desc="Preloading landmarks"):
-                landmarks, attention_mask = self._load_and_process(idx)
-                self.cached_landmarks.append(landmarks)
-                self.cached_attention_masks.append(attention_mask)
+                landmarks_np, mask_np = self._load_and_process(idx)
+                # Store as CPU tensors so __getitem__ returns them directly
+                # without any per-call numpy->tensor conversion overhead.
+                # .clone() frees the numpy backing array reference.
+                self.cached_landmarks.append(
+                    torch.from_numpy(landmarks_np).clone()
+                )
+                self.cached_attention_masks.append(
+                    torch.from_numpy(mask_np).clone()
+                )
 
     def __len__(self):
         return len(self.df)
@@ -71,17 +78,20 @@ class LandmarkTextDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.in_memory:
+            # Cached tensors: no disk I/O, no numpy conversion
             landmarks = self.cached_landmarks[idx]
             attention_mask = self.cached_attention_masks[idx]
         else:
-            landmarks, attention_mask = self._load_and_process(idx)
+            landmarks_np, mask_np = self._load_and_process(idx)
+            landmarks = torch.from_numpy(landmarks_np)
+            attention_mask = torch.from_numpy(mask_np)
 
         row = self.df.iloc[idx]
         text = str(row[self.text_col])
 
         return {
-            "landmarks": torch.from_numpy(landmarks),
-            "attention_mask": torch.from_numpy(attention_mask),
+            "landmarks": landmarks,
+            "attention_mask": attention_mask,
             "text": text,
         }
 
