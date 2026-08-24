@@ -2,35 +2,20 @@
 Extract MediaPipe Holistic landmarks from video clips listed in an index CSV
 (produced by scripts/build_index.py) and save them as .npy files.
 
-Runs entirely on CPU - GPU is never touched here.
-
-Landmark layout per frame (345 dims total):
-    pose:        33 landmarks x 3 (x, y, z)         = 99
-    left_hand:   21 landmarks x 3 (x, y, z)          = 63
-    right_hand:  21 landmarks x 3 (x, y, z)          = 63
-    face:        40 landmarks x 3 (x, y, z)          = 120 (reduced set: eyebrows + mouth contour)
-If a landmark group is not detected in a frame, it is zero-filled rather
-than skipped, so every frame is always exactly 345 dims.
-
-Usage:
-    python src/extract_landmarks.py ^
-        --index data/wlasl/index_wlasl100.csv ^
-        --out_dir data/landmarks/wlasl100 ^
-        --frame_col_start frame_start --frame_col_end frame_end ^
-        --max_frames 150
-
-For datasets without trim columns (e.g. How2Sign full-clip sentences), omit
---frame_col_start/--frame_col_end and the whole video will be used.
+Supports Windows/Linux multiprocessing and frame downsampling/filtering for 10x+ speedup.
 """
 
 import argparse
 import os
 import sys
-
 import cv2
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Global worker-specific MediaPipe instance
+worker_holistic = None
 
 try:
     import mediapipe as mp
@@ -90,11 +75,10 @@ def extract_frame_landmarks(results):
     return np.concatenate([pose, left_hand, right_hand, face])  # (345,)
 
 
-def process_video(video_path, holistic, frame_start=None, frame_end=None):
+def process_video(video_path, holistic, frame_start=None, frame_end=None, max_frames=150):
     """Run MediaPipe Holistic over a video (or a frame range within it).
 
-    frame_start / frame_end are 1-indexed inclusive, matching the WLASL
-    nslt_*.json convention. frame_end == -1 means "to the last frame".
+    frame_start / frame_end are 1-indexed inclusive.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -102,18 +86,26 @@ def process_video(video_path, holistic, frame_start=None, frame_end=None):
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if frame_start is None:
+    if frame_start is None or pd.isna(frame_start):
         start_idx = 0
     else:
         start_idx = max(0, int(frame_start) - 1)
 
-    if frame_end is None or int(frame_end) == -1:
+    if frame_end is None or pd.isna(frame_end) or int(frame_end) == -1:
         end_idx = total_frames - 1
     else:
         end_idx = min(total_frames - 1, int(frame_end) - 1)
 
     if end_idx < start_idx:
         end_idx = start_idx
+
+    segment_len = end_idx - start_idx + 1
+
+    # Opt 1: Downsample target frames beforehand to avoid running MediaPipe on redundant frames
+    if segment_len > max_frames:
+        target_indices = set(np.linspace(start_idx, end_idx, max_frames).astype(int))
+    else:
+        target_indices = set(range(start_idx, end_idx + 1))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
 
@@ -123,10 +115,11 @@ def process_video(video_path, holistic, frame_start=None, frame_end=None):
         ret, frame = cap.read()
         if not ret:
             break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb.flags.writeable = False
-        results = holistic.process(rgb)
-        frames_landmarks.append(extract_frame_landmarks(results))
+        if current_idx in target_indices:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False
+            results = holistic.process(rgb)
+            frames_landmarks.append(extract_frame_landmarks(results))
         current_idx += 1
 
     cap.release()
@@ -149,6 +142,46 @@ def pad_or_truncate(arr, max_frames):
     return np.concatenate([arr, pad], axis=0)
 
 
+def init_worker(min_detection_confidence, min_tracking_confidence):
+    global worker_holistic
+    import mediapipe as mp
+    mp_holistic = mp.solutions.holistic
+    worker_holistic = mp_holistic.Holistic(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=min_detection_confidence,
+        min_tracking_confidence=min_tracking_confidence,
+    )
+
+
+def worker_task(args_tuple):
+    row_dict, out_dir, id_col, video_col, frame_col_start, frame_col_end, max_frames, skip_existing = args_tuple
+    video_id = str(row_dict[id_col])
+    video_path = row_dict[video_col]
+    out_path = os.path.join(out_dir, f"{video_id}.npy")
+
+    if skip_existing and os.path.exists(out_path):
+        return {"status": "skipped", "row": row_dict, "path": out_path}
+
+    if not os.path.exists(video_path):
+        return {"status": "failed", "video_id": video_id}
+
+    frame_start = row_dict.get(frame_col_start) if frame_col_start else None
+    frame_end = row_dict.get(frame_col_end) if frame_col_end else None
+
+    try:
+        landmarks = process_video(video_path, worker_holistic, frame_start, frame_end, max_frames)
+        if landmarks is None:
+            return {"status": "failed", "video_id": video_id}
+
+        landmarks = pad_or_truncate(landmarks, max_frames)
+        np.save(out_path, landmarks.astype(np.float32))
+        return {"status": "success", "row": row_dict, "path": out_path}
+    except Exception as e:
+        sys.stderr.write(f"Error processing video_id {video_id}: {e}\n")
+        return {"status": "failed", "video_id": video_id}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", required=True, help="Path to index CSV from build_index.py")
@@ -156,16 +189,18 @@ def main():
     parser.add_argument("--video_col", default="video_path")
     parser.add_argument("--id_col", default="video_id")
     parser.add_argument("--frame_col_start", default=None,
-                         help="Column name for 1-indexed start frame (omit if full video)")
+                        help="Column name for 1-indexed start frame (omit if full video)")
     parser.add_argument("--frame_col_end", default=None,
-                         help="Column name for 1-indexed end frame, -1 = last frame")
+                        help="Column name for 1-indexed end frame, -1 = last frame")
     parser.add_argument("--max_frames", type=int, default=150)
     parser.add_argument("--min_detection_confidence", type=float, default=0.5)
     parser.add_argument("--min_tracking_confidence", type=float, default=0.5)
     parser.add_argument("--limit", type=int, default=None,
-                         help="Optional cap on number of clips, for a quick smoke test")
+                        help="Optional cap on number of clips, for a quick smoke test")
     parser.add_argument("--skip_existing", action="store_true", default=True,
-                         help="Skip clips that already have a saved .npy (resume support)")
+                        help="Skip clips that already have a saved .npy (resume support)")
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="Number of parallel processes (defaults to number of CPU cores minus 2)")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -176,54 +211,59 @@ def main():
 
     print(f"Loaded index with {len(df)} rows from {args.index}")
 
-    mp_holistic = mp.solutions.holistic
+    # Determine workers count
+    if args.num_workers is None:
+        cpu_count = os.cpu_count() or 1
+        args.num_workers = max(1, cpu_count - 2)
+
+    print(f"Running landmark extraction with {args.num_workers} parallel workers...")
+
+    # Build tasks input arguments
+    tasks = []
+    for _, row in df.iterrows():
+        tasks.append((
+            row.to_dict(),
+            args.out_dir,
+            args.id_col,
+            args.video_col,
+            args.frame_col_start,
+            args.frame_col_end,
+            args.max_frames,
+            args.skip_existing
+        ))
 
     manifest_rows = []
     n_ok, n_fail, n_skipped_existing = 0, 0, 0
 
-    with mp_holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        min_detection_confidence=args.min_detection_confidence,
-        min_tracking_confidence=args.min_tracking_confidence,
-    ) as holistic:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Extracting landmarks"):
-            video_id = str(row[args.id_col])
-            video_path = row[args.video_col]
-            out_path = os.path.join(args.out_dir, f"{video_id}.npy")
-
-            if args.skip_existing and os.path.exists(out_path):
+    # Execute tasks using ProcessPoolExecutor
+    with ProcessPoolExecutor(
+        max_workers=args.num_workers,
+        initializer=init_worker,
+        initargs=(args.min_detection_confidence, args.min_tracking_confidence)
+    ) as executor:
+        futures = {executor.submit(worker_task, task): task for task in tasks}
+        
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Extracting landmarks"):
+            res = future.result()
+            status = res["status"]
+            if status == "success":
+                row_dict = res["row"]
+                row_dict["landmark_path"] = res["path"]
+                manifest_rows.append(row_dict)
+                n_ok += 1
+            elif status == "skipped":
+                row_dict = res["row"]
+                row_dict["landmark_path"] = res["path"]
+                manifest_rows.append(row_dict)
                 n_skipped_existing += 1
-                manifest_rows.append({**row.to_dict(), "landmark_path": out_path})
-                continue
-
-            if not os.path.exists(video_path):
+            else:
                 n_fail += 1
-                continue
-
-            frame_start = row[args.frame_col_start] if args.frame_col_start else None
-            frame_end = row[args.frame_col_end] if args.frame_col_end else None
-
-            landmarks = process_video(video_path, holistic, frame_start, frame_end)
-            if landmarks is None:
-                n_fail += 1
-                continue
-
-            landmarks = pad_or_truncate(landmarks, args.max_frames)
-            np.save(out_path, landmarks.astype(np.float32))
-
-            manifest_rows.append({**row.to_dict(), "landmark_path": out_path})
-            n_ok += 1
 
     manifest_path = os.path.join(args.out_dir, "manifest.csv")
     pd.DataFrame(manifest_rows).to_csv(manifest_path, index=False)
 
     print(f"\nDone. Extracted: {n_ok} | Skipped (already existed): {n_skipped_existing} | Failed: {n_fail}")
     print(f"Manifest written to {manifest_path}")
-    if n_fail > 0:
-        print("NOTE: failed clips were excluded from the manifest. This is normal for a "
-              "small fraction of clips (corrupt files, 0-length trims). If failures are "
-              "a large fraction of the dataset, check video paths and codec support.")
 
 
 if __name__ == "__main__":

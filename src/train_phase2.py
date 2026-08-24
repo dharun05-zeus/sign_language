@@ -262,11 +262,11 @@ def main():
     phase1_dir = cfg["phase1_checkpoint_dir"]
     model = load_phase1_read_only(model, phase1_dir, device)
 
-    # 4. RUN RUNTIME SPOT-CHECK
-    run_spot_check(model, cfg.get("wlasl_val_manifest", ""), device, cfg)
-
     # Move projector to GPU (t5 layers are already mapped by device_map="auto")
     model.projector.to(device)
+
+    # 4. RUN RUNTIME SPOT-CHECK
+    run_spot_check(model, cfg.get("wlasl_val_manifest", ""), device, cfg)
 
     # Load How2Sign Datasets
     how2sign_cfg = cfg["how2sign"]

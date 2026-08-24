@@ -8,7 +8,7 @@ accelerate>=0.30.0
 bitsandbytes>=0.43.0       # 4-bit NF4 quantization (Windows: needs >=0.43.0 for native win support)
 peft>=0.10.0                # LoRA
 sentencepiece>=0.2.0        # T5 tokenizer dependency
-mediapipe>=0.10.9
+mediapipe==0.10.14
 opencv-python>=4.9.0
 numpy>=1.26.0,<2.0.0        # mediapipe is not yet numpy 2.x compatible as of this writing
 pandas>=2.2.0

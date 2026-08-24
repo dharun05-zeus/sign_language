@@ -75,7 +75,10 @@ def main():
             attention_mask = batch["attention_mask"].to(device)
             texts = batch["texts"]
 
-            preds = model.generate(landmarks, attention_mask, num_beams=args.num_beams)
+            max_new_tokens = 128 if args.phase == 2 else 32
+            preds = model.generate(
+                landmarks, attention_mask, max_new_tokens=max_new_tokens, num_beams=args.num_beams
+            )
             predictions.extend(preds)
             references.extend(texts)
 

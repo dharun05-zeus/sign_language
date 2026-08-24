@@ -95,8 +95,9 @@ def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=Tru
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         texts = batch["texts"]
 
+        max_target_len = 128 if "Phase2" in log_prefix else 64
         target_enc = tokenizer(
-            texts, padding=True, truncation=True, max_length=64, return_tensors="pt"
+            texts, padding=True, truncation=True, max_length=max_target_len, return_tensors="pt"
         )
         labels = target_enc["input_ids"].to(device, non_blocking=True)
         labels[labels == tokenizer.pad_token_id] = -100  # ignore pad in loss
