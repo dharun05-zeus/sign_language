@@ -34,35 +34,7 @@ studies/sign/
 
 ---
 
-## 2. Generating Manifests and Transcripts (Phase 2 Indexing)
-
-If your dataset does not already have pre-built `train_manifest.csv` or `train_transcripts.tsv` files matching the project format, you can automatically generate them from your folder of `.npy` landmarks and official How2Sign TSVs. 
-
-Run the indexing script for the **train** and **validation** sets:
-
-```bash
-# 1. Build the train index
-python scripts/build_how2sign_index.py \
-    --npy_dir data/landmarks/how2sign/train \
-    --tsv_path data/how2sign/how2sign_realign_train.tsv \
-    --split train \
-    --out_manifest data/how2sign/train_manifest.csv \
-    --out_transcripts data/how2sign/train_transcripts.tsv
-
-# 2. Build the validation index
-python scripts/build_how2sign_index.py \
-    --npy_dir data/landmarks/how2sign/val \
-    --tsv_path data/how2sign/how2sign_realign_val.tsv \
-    --split val \
-    --out_manifest data/how2sign/val_manifest.csv \
-    --out_transcripts data/how2sign/val_transcripts.tsv
-```
-
-This maps files on disk, verifies they exist, and outputs the manifest files in the layout required by the training script.
-
----
-
-## 3. Dependencies and virtual environment
+## 2. Dependencies and virtual environment
 Ensure you are inside the `asl-env` virtual environment (running Python `3.10.11`) and all dependencies are installed:
 ```bash
 conda activate asl-env

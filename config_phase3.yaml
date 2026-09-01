@@ -1,0 +1,43 @@
+# ASL-to-English Signer Diversity Training Hyperparameters (Phase 3 - MS-ASL100)
+
+landmark_dim: 345          # Includes eyebrows + mouth region facial landmarks
+max_frames: 150
+t5_model: t5-large
+t5_hidden_size: 1024
+projector_hidden: 512
+lora_r: 16
+lora_alpha: 32
+batch_size: 4
+gradient_accumulation_steps: 4  # Effective batch size = 16
+fp16: true
+gradient_checkpointing: true
+max_grad_norm: 1.0
+
+# Catastrophic Forgetting Guard Settings
+bleu_drop_threshold: 2.0        # Automatic training halt if How2Sign sentence BLEU-4 drops > 2.0 pts
+
+# Checkpoints Configuration
+phase2_checkpoint_dir: checkpoints/phase2  # Phase 2 starting point (loaded read-only)
+phase3_out_dir: checkpoints/phase3         # Final Phase 3 output directory
+
+# MS-ASL100 Dataset Configuration
+msasl:
+  dataset: MS-ASL100
+  max_classes: 100
+  epochs: 10
+  lr_projector: 5.0e-6          # 10x lower than Phase 2 (5.0e-5 -> 5.0e-6)
+  lr_lora: 1.0e-5               # 10x lower than Phase 2 (1.0e-4 -> 1.0e-5)
+  train_json: data/msasl/MSASL_train.json
+  val_json: data/msasl/MSASL_val.json
+  test_json: data/msasl/MSASL_test.json
+  classes_json: data/msasl/MSASL_classes.json
+  synonym_json: data/msasl/MSASL_synonym.json
+  landmarks_dir: data/landmarks/msasl100
+  manifest_csv: data/msasl/manifest.csv
+  val_every: 1
+
+# How2Sign Held-Out Validation Subset (for Catastrophic Forgetting BLEU-4 Verification)
+how2sign_eval:
+  val_manifest: data/how2sign/val_manifest.csv
+  val_transcripts: data/how2sign/val_transcripts.tsv
+  subset_limit: 100             # Fast, representative evaluation subset per epoch
