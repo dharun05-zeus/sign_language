@@ -37,7 +37,7 @@ def verify_bitsandbytes_cuda():
         x = torch.randn(2, 10).cuda()
         with torch.no_grad():
             _ = dummy_layer(x)
-        print(f"✅ bitsandbytes CUDA setup validated successfully (bnb version: {bnb.__version__}).")
+        print(f"[OK] bitsandbytes CUDA setup validated successfully (bnb version: {bnb.__version__}).")
         
         # Explicitly free memory occupied by the dummy layer
         del dummy_layer
@@ -97,16 +97,16 @@ def run_spot_check(model, wlasl_manifest, device, cfg):
                 pred_text = preds[0] if preds else "<empty>"
                 print(f"  Target Gloss:    {target:<15} | Predicted: {pred_text}")
                 
-        print("\n✅ Phase 1 spot-check completed successfully. Network loaded correctly.")
+        print("\n[OK] Phase 1 spot-check completed successfully. Network loaded correctly.")
         print("=====================================\n")
     except Exception as e:
-        print(f"⚠️ Warning during WLASL100 spot-check: {e}")
+        print(f"[WARNING] Warning during WLASL100 spot-check: {e}")
         print("Review setup before starting full training. Proceeding to training script setup.")
         print("=====================================\n")
 
 
 def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=True, 
-              log_prefix="", grad_accum=1, limit_batches=None):
+              log_prefix="", grad_accum=1, limit_batches=None, dtype=torch.float16):
     model.train(train)
     total_loss = 0.0
     n_batches = 0
@@ -138,7 +138,7 @@ def run_epoch(model, dataloader, optimizer, scaler, device, tokenizer, train=Tru
         labels[labels == tokenizer.pad_token_id] = -100  # ignore pad in loss
 
         device_type = "cuda" if "cuda" in device else "cpu"
-        with autocast(device_type=device_type, dtype=torch.float16, enabled=("cuda" in device)):
+        with autocast(device_type=device_type, dtype=dtype, enabled=("cuda" in device)):
             outputs = model(landmarks=landmarks, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss / grad_accum
 
@@ -307,7 +307,19 @@ def main():
         lr_lora=how2sign_cfg["lr_lora"],
     )
     optimizer = torch.optim.AdamW(param_groups)
-    scaler = GradScaler(enabled=cfg.get("fp16", True))
+    # Determine precision / dtype dynamically
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        print("Using bfloat16 mixed precision training (more stable for T5).")
+        dtype = torch.bfloat16
+        scaler = GradScaler(enabled=False)
+    elif cfg.get("fp16", True):
+        print("Using float16 mixed precision training.")
+        dtype = torch.float16
+        scaler = GradScaler(enabled=True)
+    else:
+        print("Using float32 training.")
+        dtype = torch.float32
+        scaler = GradScaler(enabled=False)
 
     out_dir = cfg["phase2_out_dir"]
     grad_accum = cfg.get("gradient_accumulation_steps", 1)
@@ -320,7 +332,7 @@ def main():
         run_epoch(
             model, train_loader, optimizer, scaler, device, model.tokenizer,
             train=True, log_prefix="DryRun/[train]",
-            grad_accum=grad_accum, limit_batches=8
+            grad_accum=grad_accum, limit_batches=8, dtype=dtype
         )
         
         # Memory profile reporting
@@ -347,7 +359,7 @@ def main():
         train_loss = run_epoch(
             model, train_loader, optimizer, scaler, device, model.tokenizer,
             train=True, log_prefix=f"Phase2 Epoch {epoch}/[train]",
-            grad_accum=grad_accum
+            grad_accum=grad_accum, dtype=dtype
         )
 
         val_loss = None
@@ -356,7 +368,7 @@ def main():
                 val_loss = run_epoch(
                     model, val_loader, optimizer, scaler, device, model.tokenizer,
                     train=False, log_prefix=f"Phase2 Epoch {epoch}/[val]",
-                    grad_accum=grad_accum
+                    grad_accum=grad_accum, dtype=dtype
                 )
 
         print(f"Epoch {epoch}: train_loss={train_loss:.4f}"

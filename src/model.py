@@ -87,6 +87,8 @@ def build_t5_4bit_lora(model_name="t5-large", lora_r=16, lora_alpha=32, lora_dro
         model_name,
         quantization_config=bnb_config,
         device_map="auto",
+        low_cpu_mem_usage=True,
+        torch_dtype=torch.bfloat16,
     )
 
     # ← Must come BEFORE get_peft_model() so the hook is on the base model.
